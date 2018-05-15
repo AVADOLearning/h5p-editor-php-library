@@ -339,6 +339,10 @@ class H5peditor {
    * @return array Libraries that was requested
    */
   public function getLibraryData($machineName, $majorVersion, $minorVersion, $languageCode, $prefix = '', $fileDir = '') {
+    global $CFG;
+
+    $fileDir = $fileDir === '' ? $CFG->dataroot.'/filedir' : $fileDir;
+
     $libraryData = new stdClass();
 
     $libraries              = $this->findEditorLibraries($machineName, $majorVersion, $minorVersion);
@@ -358,36 +362,30 @@ class H5peditor {
     // Restore asset aggregation setting
     $this->h5p->aggregateAssets = $aggregateAssets;
 
-    // Create base URL
-    $url = $this->h5p->url;
+    if (!empty($files['scripts']) || !empty($files['styles'])) {
 
-    // Javascripts
-    if (!empty($files['scripts'])) {
+      // First get all file paths for css & js
+      $dependencies = [];
+      foreach ($files as $type) {
+          foreach ($type as $file) {
+            preg_match('/^\/(libraries|development|cachedassets)(.*\/)([^\/]+)$/', $file->path, $locations);
+            $dependencies[] = $locations[2];
+          }
+      }
+      // Now remove any duplicates
+      $dependencies = array_unique($dependencies);
+
+      // Get dependency file content hashes
+      $fileRecords = $this->h5p->fs->getFileRecords($dependencies);
+
       foreach ($files['scripts'] as $script) {
-        if (preg_match('/:\/\//', $script->path) === 1) {
-          // External file
-          $libraryData->javascript[$script->path . $script->version] = "\n" . file_get_contents($script->path);
-        }
-        else {
-          // Local file
-          $libraryData->javascript[$url . $script->path . $script->version] = "\n" . $this->h5p->fs->getContent($fileDir . $script->path);
-        }
+        $this->assignLibraryData($script, 'scripts', $fileRecords, $libraryData, $fileDir);
       }
-    }
 
-    // Stylesheets
-    if (!empty($files['styles'])) {
       foreach ($files['styles'] as $css) {
-        if (preg_match('/:\/\//', $css->path) === 1) {
-          // External file
-          $libraryData->css[$css->path . $css->version] = file_get_contents($css->path);
-        }
-        else {
-          // Local file
-          H5peditor::buildCssPath(NULL, $url . dirname($css->path) . '/');
-          $libraryData->css[$url . $css->path . $css->version] = preg_replace_callback('/url\([\'"]?(?![a-z]+:|\/+)([^\'")]+)[\'"]?\)/i', 'H5peditor::buildCssPath', $this->h5p->fs->getContent($fileDir . $css->path));
-        }
+        $this->assignLibraryData($css, 'css', $fileRecords, $libraryData, $fileDir);
       }
+
     }
 
     // Add translations for libraries.
@@ -403,6 +401,40 @@ class H5peditor {
   }
 
   /**
+   * Assign CSS and JS URLs and corresponding file contents to $libraryData object.
+   *
+   * @param  \stdClass $file        Dependency file, containing path & version information.
+   * @param  string    $type        File type ('scripts' for js - 'css' for css).
+   * @param  array     $fileRecords List of activity dependencies containing filenames and contenthashes.
+   * @param  \stdClass $libraryData Contains URLs and filecontents for activity dependencies.
+   * @param  string    $fileDir     File directory root.
+   * @return \stdClass $libraryData
+   */
+  protected function assignLibraryData($file, $type, $fileRecords, $libraryData, $fileDir) {
+    $url = $this->h5p->url;
+
+    if (preg_match('/:\/\//', $file->path) === 1) {
+        // External file
+        $libraryData->$type[$file->path . $file->version] = file_get_contents($file->path);
+    }
+    else {
+      // Local file
+      preg_match('/^\/(libraries|development|cachedassets)(.*\/)([^\/]+)$/', $file->path, $partials);
+      $contentHash = $fileRecords[$partials[3]]->contenthash;
+      $filepath = "{$fileDir}/{$contentHash[0]}{$contentHash[1]}/{$contentHash[2]}{$contentHash[3]}/$contentHash";
+
+      if ($type == 'css') {
+        H5peditor::buildCssPath(NULL, $url . dirname($file->path) . '/');
+        $libraryData->$type[$url . $file->path . $file->version] = preg_replace_callback('/url\([\'"]?(?![a-z]+:|\/+)([^\'")]+)[\'"]?\)/i', 'H5peditor::buildCssPath', file_get_contents($filepath));
+      } elseif ($type == 'scripts') {
+        $libraryData->$type[$url . $file->path . $file->version] = "\n" . file_get_contents($filepath);
+      }
+    }
+    return $libraryData;
+  }
+
+
+    /**
    * This function will prefix all paths within a CSS file.
    * Copied from Drupal 6.
    *
